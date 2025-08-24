@@ -1,0 +1,4 @@
+# config/data.yml
+data_dir: "data/raw"
+ohlcv_glob: "*.parquet"
+min_volume: 0
