@@ -2,3 +2,25 @@
 data_dir: "data/raw"
 ohlcv_glob: "*.parquet"
 min_volume: 0
+
+raw_dirs:
+  hsx: "HSX"
+  hnx: "HNX"
+  indices: "vn_indices"  # folder containing CSV files: VNINDEX.csv, HNX-INDEX.csv, VN30.csv
+
+indices_required:
+  - "VNINDEX"
+  - "HNXINDEX"
+  - "VN30"
+
+date_range:
+  start: "2010-01-01"
+  end: "2025-08-31"
+
+extreme_move_abs: 0.50
+
+out:
+  ohlcv_parquet: "data/clean/ohlcv.parquet"
+  coverage_csv: "data/clean/coverage_summary.csv"
+  anomalies_csv: "data/clean/anomalies.csv"
+  hard_errors_csv: "data/clean/hard_errors.csv"
