@@ -12,7 +12,7 @@ def _df_from_rows(rows: list[dict]) -> pd.DataFrame:
     return df
 
 
-def test_soft_rules_flag_but_do_not_drop_rows():
+def test_price_non_positive_is_hard_removed_other_rules_soft():
     # Prices include zero/negative and OHLC ordering violations; volume has NaN/zero.
     rows = [
         {"date": "2020-01-01", "ticker": "AAA", "open": -1.0, "high": 9.0, "low": 8.0, "close": 9.0, "volume": 0},
@@ -25,8 +25,8 @@ def test_soft_rules_flag_but_do_not_drop_rows():
 
     clean, anoms = validate_ohlcv(df)
 
-    # Soft rules: rows retained in clean df
-    assert len(clean) == len(df)
+    # HARD: price non-positive rows removed from clean df
+    assert len(clean) == len(df) - 1
     # Anomalies include price and/or OHLC ordering and volume flags
     rules = " ".join(str(r).lower() for r in anoms.get("rule", []))
     assert any(k in rules for k in ["price", "posit", "non-positive"])  # price positivity

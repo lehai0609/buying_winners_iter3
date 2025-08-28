@@ -110,42 +110,47 @@ def validate_ohlcv(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if df.index.duplicated().any():
         raise ValueError("duplicate (date,ticker) entries detected")
 
-    # Build anomaly flags (soft rules)
+    # Build anomaly flags
     anoms_parts = []
 
+    # HARD: Non-positive prices -> remove from clean output
     price_nonpos = (df[["open", "high", "low", "close"]] <= 0).any(axis=1)
     if price_nonpos.any():
         part = df.loc[price_nonpos, ["open", "high", "low", "close", "volume"]].copy()
         part["rule"] = "price_non_positive"
         part["detail"] = "one or more of open,high,low,close <= 0"
         anoms_parts.append(part)
+        # Drop hard failures from clean df
+        df = df.loc[~price_nonpos].sort_index()
 
-    ohlc_order = (df["high"] < df[["open", "close"]].max(axis=1)) | (
-        df["low"] > df[["open", "close"]].min(axis=1)
-    ) | (df["high"] < df["low"])
-    if ohlc_order.any():
-        part = df.loc[ohlc_order, ["open", "high", "low", "close", "volume"]].copy()
-        part["rule"] = "ohlc_ordering_violation"
-        part["detail"] = "high<max(open,close) or low>min(open,close) or high<low"
-        anoms_parts.append(part)
+    # SOFT: Other quality flags
+    if not df.empty:
+        ohlc_order = (df["high"] < df[["open", "close"]].max(axis=1)) | (
+            df["low"] > df[["open", "close"]].min(axis=1)
+        ) | (df["high"] < df["low"])
+        if ohlc_order.any():
+            part = df.loc[ohlc_order, ["open", "high", "low", "close", "volume"]].copy()
+            part["rule"] = "ohlc_ordering_violation"
+            part["detail"] = "high<max(open,close) or low>min(open,close) or high<low"
+            anoms_parts.append(part)
 
-    vol_flag = df["volume"].isna() | (df["volume"] == 0)
-    if vol_flag.any():
-        part = df.loc[vol_flag, ["open", "high", "low", "close", "volume"]].copy()
-        part["rule"] = "volume_zero_or_nan"
-        part["detail"] = "volume is NaN or 0"
-        anoms_parts.append(part)
+        vol_flag = df["volume"].isna() | (df["volume"] == 0)
+        if vol_flag.any():
+            part = df.loc[vol_flag, ["open", "high", "low", "close", "volume"]].copy()
+            part["rule"] = "volume_zero_or_nan"
+            part["detail"] = "volume is NaN or 0"
+            anoms_parts.append(part)
 
-    thr = float(cfg.get("extreme_move_abs", 0.50))
-    prev_close = df.groupby(level="ticker")["close"].shift(1)
-    ret_d = df["close"] / prev_close - 1.0
-    extreme = ret_d.abs() > thr
-    extreme = extreme & prev_close.notna()
-    if extreme.any():
-        part = df.loc[extreme, ["open", "high", "low", "close", "volume"]].copy()
-        part["rule"] = "extreme_move"
-        part["detail"] = ("ret_d=" + ret_d.loc[extreme].round(6).astype(str))
-        anoms_parts.append(part)
+        thr = float(cfg.get("extreme_move_abs", 0.50))
+        prev_close = df.groupby(level="ticker")["close"].shift(1)
+        ret_d = df["close"] / prev_close - 1.0
+        extreme = ret_d.abs() > thr
+        extreme = extreme & prev_close.notna()
+        if extreme.any():
+            part = df.loc[extreme, ["open", "high", "low", "close", "volume"]].copy()
+            part["rule"] = "extreme_move"
+            part["detail"] = ("ret_d=" + ret_d.loc[extreme].round(6).astype(str))
+            anoms_parts.append(part)
 
     if anoms_parts:
         anoms = pd.concat(anoms_parts, axis=0).reset_index()

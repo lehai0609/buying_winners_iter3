@@ -24,3 +24,50 @@ out:
   coverage_csv: "data/clean/coverage_summary.csv"
   anomalies_csv: "data/clean/anomalies.csv"
   hard_errors_csv: "data/clean/hard_errors.csv"
+
+signals:
+  momentum:
+    lookback_months: 12
+    gap_months: 1
+    n_deciles: 10
+    min_months_history: 13  # default J+G
+    min_names_per_month: 50
+    exclude_hard_errors: true
+    calendar: "union"  # or "vnindex"
+    price_col: "close"
+
+portfolio:
+  k_months: 6
+  selection: top_decile   # or 'top_quantile'
+  long_decile: 10
+  top_quantile: 0.10
+  renormalize_within_cohort: true
+  redistribute_across_cohorts: false
+  exclude_on_missing_price: true
+  calendar: "union"
+
+backtest:
+  lag_days: 1
+  exec_price: "open"     # or "close"
+  calendar: "union"      # or "vnindex"
+  skip_on_halt: true
+  skip_on_limit: true
+  price_limit_pct: 0.07   # 7% HOSE/HNX defaults; 0 to disable
+  write_holdings_daily: false
+  write_executions: false
+
+cv:
+  train_months: 36
+  valid_months: 12
+  j_grid: [3, 6, 9, 12]
+  k_grid: [1, 3, 6, 12]
+  skip_days: 5
+  metric: sharpe  # options: sharpe|alpha_nw|ir_vs_benchmark|sortino
+  tie_breaker: lower_turnover  # options: lower_turnover|higher_return|lower_k
+
+robustness:
+  cost_bps_grid: [0, 10, 25, 50]
+  subperiods:
+    - { name: "2010-2014", start: "2010-01-31", end: "2014-12-31" }
+    - { name: "2015-2019", start: "2015-01-31", end: "2019-12-31" }
+    - { name: "2020-2025", start: "2020-01-31", end: "2025-12-31" }

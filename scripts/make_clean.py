@@ -81,12 +81,10 @@ def main(argv: list[str] | None = None) -> int:
         hard_errors.append({"stage": "load_ohlcv", "error": msg})
         # Attempt diagnostics for duplicates or schema issues
         try:
-            import pandas as pd
-            import pathlib
             req = ["time", "open", "high", "low", "close", "volume"]
             frames = []
             for p in equity_files:
-                pth = pathlib.Path(p)
+                pth = Path(p)
                 try:
                     if pth.suffix.lower() == ".csv":
                         d0 = pd.read_csv(pth)
@@ -129,6 +127,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Loaded OHLCV: {len(df):,} rows across {df.index.get_level_values('ticker').nunique()} tickers; dates {dmin.date()}..{dmax.date()}")
 
     clean_df, anoms = validate_ohlcv(df)
+
+    # Collect hard removals from validation (e.g., price_non_positive)
+    try:
+        if isinstance(anoms, pd.DataFrame) and not anoms.empty:
+            hard_mask = anoms.get("rule", pd.Series(dtype=object)).astype(str) == "price_non_positive"
+            if hard_mask.any():
+                hard_rows = anoms.loc[hard_mask].copy()
+                for _, row in hard_rows.iterrows():
+                    hard_errors.append({
+                        "stage": "validate_ohlcv",
+                        "error": "price_non_positive",
+                        "date": str(row.get("date", "")),
+                        "ticker": row.get("ticker", ""),
+                        "open": row.get("open", None),
+                        "high": row.get("high", None),
+                        "low": row.get("low", None),
+                        "close": row.get("close", None),
+                        "volume": row.get("volume", None),
+                    })
+    except Exception as e:
+        # Non-fatal; continue with pipeline
+        print(f"warning: failed to collect hard removals: {e}")
 
     # Load indices and report alignment (no persistence)
     try:
