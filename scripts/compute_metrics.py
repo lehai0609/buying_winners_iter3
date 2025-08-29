@@ -7,6 +7,11 @@ import sys
 import numpy as np
 import pandas as pd
 
+# Ensure project root (containing `src/`) is importable when running as a script
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from src.metrics import perf_summary, drawdown_stats, subperiod_metrics
 from src.stats import alpha_newey_west, bootstrap_cis
 from src.data_io import load_indices, get_index_series

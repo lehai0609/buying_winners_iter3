@@ -1,0 +1,160 @@
+﻿*** Begin Patch
+*** Update File: cli_interface.md
+@@
+-Order of work and one-line CLIs:
+-
+-1. M1 �?" ingest & validate
+-   poetry run python scripts/make\_clean.py -c config/data.yml --hsx-dir HSX --hnx-dir HNX --indices-dir vn\_indices --out-parquet data/clean/ohlcv.parquet --coverage-csv data/clean/coverage\_summary.csv --anomalies-csv data/clean/anomalies.csv --verbose
+-
+-2. M2 �?" eligibility + universe
+-   poetry run python scripts/make\_universe.py --in-parquet data/clean/ohlcv.parquet --indices-dir vn\_indices --anomalies-csv data/clean/anomalies.csv --flags-parquet data/clean/eligibility.parquet --universe-parquet data/clean/monthly\_universe.parquet --lookback-days 126 --min-history-days 126 --min-price-vnd 1000 --min-adv-vnd 100000000 --max-nontrading 15 --calendar union --price-scale 1000 --verbose
+-
+-3. M3 �?" returns + calendar artifacts
+-   poetry run python scripts/make\_returns.py --in-parquet data/clean/ohlcv.parquet --indices-dir vn\_indices --calendar union --out-daily data/clean/daily\_returns.parquet --out-forward data/clean/forward\_returns.parquet --forward-horizons 1 5 21 --out-monthly data/clean/monthly\_returns.csv --monthly-flags data/clean/eligibility.parquet --out-eligible-monthly data/clean/eligible\_monthly\_returns.parquet
+-
+-4. M4 �?" momentum signals (J, skip-5, deciles)
+-   poetry run python scripts/compute\_momentum.py -c config/data.yml --indices-dir vn\_indices --out-parquet data/clean/momentum.parquet --summary-csv data/clean/momentum\_summary.csv&#x20;
+-
+-5. M5 �?" portfolio construction (overlapping K)
+-   poetry run python scripts/compute\_portfolio.py -c config/data.yml&#x20;
+-
+-6. M6 �?" trading frictions applied in pipeline
+-   Configured in costs/backtest; outputs like portfolio\_trades\_costed.parquet per spec. No separate CLI needed.&#x20;
+-
+-7. M7 �?" backtest engine (writes daily/monthly PnL)
+-   poetry run python scripts/run\_backtest.py&#x20;
+-
+-8. M8 �?" metrics and alpha tests
+-   poetry run python scripts/compute\_metrics.py --backtest-monthly data/clean/backtest\_monthly.parquet --indices-dir vn\_indices --benchmark VNINDEX --use-net&#x20;
+-
+-9. M9 �?" CV grid + robustness
+-   poetry run python scripts/compute\_cv.py -c config/data.yml; poetry run python scripts/compute\_robustness.py -c config/data.yml --params 12 6
+-
+-10. M10 �?" report + run logging
+-    poetry run python scripts/make\_report.py -c config/data.yml --run-id momentum\_run\_\20250829; optional: poetry run python scripts/log\_experiment.py \<run\_id> -c config/data.yml --metrics sharpe=�?� ret\_ann=�?�&#x20;
++CLI Pipeline Overview (corrected)
++
++Below is the end-to-end pipeline with one-liner commands. Flags and paths match the actual script interfaces in scripts/. Commands assume a Poetry shell; prefix with poetry run if your venv is not activated.
++
++1) M1 — Ingest & Validate
++
++`ash
++poetry run python scripts/make_clean.py \
++  --config config/data.yml \
++  --hsx-dir HSX \
++  --hnx-dir HNX \
++  --indices-dir vn_indices \
++  --out-parquet data/clean/ohlcv.parquet \
++  --coverage-csv data/clean/coverage_summary.csv \
++  --anomalies-csv data/clean/anomalies.csv \
++  --verbose
++`
++
++2) M2 — Eligibility & Monthly Universe
++
++`ash
++poetry run python scripts/make_universe.py \
++  --in-parquet data/clean/ohlcv.parquet \
++  --indices-dir vn_indices \
++  --anomalies-csv data/clean/anomalies.csv \
++  --flags-parquet data/clean/eligibility.parquet \
++  --universe-parquet data/clean/monthly_universe.parquet \
++  --lookback-days 126 \
++  --min-history-days 126 \
++  --min-price-vnd 1000 \
++  --min-adv-vnd 100000000 \
++  --max-nontrading 15 \
++  --calendar union \
++  --price-scale 1000 \
++  --verbose
++`
++
++3) M3 — Returns & Calendar Artifacts
++
++`ash
++poetry run python scripts/make_returns.py \
++  --in-parquet data/clean/ohlcv.parquet \
++  --indices-dir vn_indices \
++  --calendar union \
++  --out-daily data/clean/daily_returns.parquet \
++  --out-forward data/clean/forward_returns.parquet \
++  --forward-horizons 1 5 21 \
++  --out-monthly data/clean/monthly_returns.csv \
++  --monthly-flags data/clean/eligibility.parquet \
++  --out-eligible-monthly data/clean/eligible_monthly_returns.parquet
++`
++
++4) M4 — Momentum Signals (J, skip, deciles)
++
++`ash
++poetry run python scripts/compute_momentum.py \
++  -c config/data.yml \
++  --indices-dir vn_indices \
++  --out-parquet data/clean/momentum.parquet \
++  --summary-csv data/clean/momentum_summary.csv
++`
++
++5) M5 — Portfolio Construction (overlapping K)
++
++`ash
++poetry run python scripts/compute_portfolio.py -c config/data.yml
++`
++
++6) M6 — Trading Costs (required before backtest)
++
++Compute ADV-based fees/slippage and write data/clean/portfolio_trades_costed.parquet and data/clean/costs_summary.csv. There is no standalone script, so use a short Python one-liner:
++
++`ash
++# Uses defaults from code; to honor config, see the second example.
++poetry run python -c "from src.costs import compute_costs; compute_costs(write=True)"
++
++# Read config/data.yml explicitly (recommended)
++poetry run python -c "import yaml; from pathlib import Path; from src.costs import compute_costs; cfg=yaml.safe_load(Path('config/data.yml').read_text()) or {}; compute_costs(cfg_dict=cfg, write=True)"
++`
++
++7) M7 — Backtest Engine (daily/monthly PnL)
++
++`ash
++poetry run python scripts/run_backtest.py
++`
++
++8) M8 — Metrics & Alpha Tests
++
++`ash
++poetry run python scripts/compute_metrics.py \
++  --backtest-monthly data/clean/backtest_monthly.parquet \
++  --indices-dir vn_indices \
++  --benchmark VNINDEX \
++  --use-net
++`
++
++9) M9 — Cross-Validation Grid & Robustness
++
++`ash
++poetry run python scripts/compute_cv.py -c config/data.yml
++poetry run python scripts/compute_robustness.py -c config/data.yml --params 12 6
++`
++
++10) M10 — Report & Run Logging
++
++`ash
++# Report (saves summary artifacts under data/clean/)
++poetry run python scripts/make_report.py -c config/data.yml --run-id momentum_run_YYYYMMDD
++
++# Windows (PowerShell) example for run id
++# poetry run python scripts/make_report.py -c config/data.yml --run-id momentum_run_20250829
++
++# macOS/Linux (bash) example for run id
++# poetry run python scripts/make_report.py -c config/data.yml --run-id momentum_run_20250829
++
++# Optional: log metrics to runs.csv
++poetry run python scripts/log_experiment.py <run_id> -c config/data.yml --metrics sharpe=1.23 ret_ann=0.18
++`
++
++Notes
++
++- Use --config for make_clean.py (short -c is not supported there). Other scripts accept -c or --config.
++- Step 6 is required: un_backtest.py expects data/clean/portfolio_trades_costed.parquet to exist.
++- Index files under n_indices/ should include: VNINDEX.csv, HNX-INDEX.csv, and VN30.csv. Names are normalized internally.
++- Outputs follow config/data.yml under out.*; CLI flags above explicitly set common paths for clarity.
+*** End Patch

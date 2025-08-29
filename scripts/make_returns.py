@@ -4,7 +4,13 @@ from pathlib import Path
 import sys
 import pandas as pd
 
+# Ensure project root (containing `src/`) is importable when running as a script
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from src.data_io import load_indices
+from src.filters import monthly_universe
 from src.returns import (
     daily_simple_returns,
     daily_log_returns,
@@ -87,12 +93,18 @@ def main(argv: list[str] | None = None) -> int:
     # Eligibility-filtered monthly returns
     if ns.monthly_flags is not None and ns.out_eligible_monthly is not None:
         flags = _read_frame(ns.monthly_flags)
-        # Ensure expected schema
+        # Accept either monthly universe (columns) or daily eligibility flags (MultiIndex)
         if {"month_end", "ticker", "eligible"}.issubset(flags.columns):
-            # Normalize date
+            # Already monthly universe
+            flags["month_end"] = pd.to_datetime(flags["month_end"], errors="raise")
+        elif isinstance(flags.index, pd.MultiIndex) and list(flags.index.names) == ["date", "ticker"] and "eligible" in flags.columns:
+            # Convert daily eligibility flags to monthly universe
+            flags = monthly_universe(flags)
             flags["month_end"] = pd.to_datetime(flags["month_end"], errors="raise")
         else:
-            raise ValueError("monthly_flags must have columns ['month_end','ticker','eligible']")
+            raise ValueError(
+                "monthly_flags must have columns ['month_end','ticker','eligible'] or be a daily eligibility parquet indexed by [date,ticker] with column 'eligible'"
+            )
         mret_e = eligible_monthly_returns(df, monthly_flags=flags, calendar=ns.calendar, indices_df=indices, price_col=ns.price_col)
         _write_frame(mret_e, ns.out_eligible_monthly)
 
@@ -101,4 +113,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

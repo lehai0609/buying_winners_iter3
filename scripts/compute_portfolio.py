@@ -6,6 +6,11 @@ import sys
 
 import pandas as pd
 
+# Ensure project root (containing `src/`) is importable when running as a script
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 try:
     import yaml  # type: ignore
 except Exception:  # pragma: no cover
@@ -45,4 +50,3 @@ def main() -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
-
