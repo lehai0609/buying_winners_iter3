@@ -1,0 +1,80 @@
+Start with these 12 modules. Read each module’s tests first, then the src file.
+
+1. Data ingest & validation
+
+* Files: src/data\_io.py; tests/test\_data\_io.py, test\_validation.py, test\_index\_loader.py.
+* Role: load OHLCV + indices, validate, write coverage/anomalies. &#x20;
+
+2. Eligibility & cleaning
+
+* Files: src/filters.py; tests/test\_filters.py.
+* Role: monthly universe from VN rules (history, price, ADV, non-trading). &#x20;
+
+3. Calendar utilities + Returns
+
+* Files: src/calendar.py, src/returns.py; tests/test\_returns.py, test\_calendar\_utils.py.
+* Role: month-ends, daily↔monthly returns, 5-day skip. &#x20;
+
+4. Momentum signal
+
+* Files: src/momentum.py; tests/test\_momentum.py.
+* Role: J-month cum-ret to t−5, deciles, D10 long-only.&#x20;
+
+5. Portfolio construction
+
+* Files: src/portfolio.py; tests/test\_portfolio.py.
+* Role: overlapping K-month cohorts, weights, trades.&#x20;
+
+6. Trading frictions
+
+* Files: src/costs.py; tests/test\_costs.py.
+* Role: fees, slippage, impact; ADV-aware.&#x20;
+
+7. Backtest engine
+
+* Files: src/backtest.py; tests/test\_backtest.py.
+* Role: monthly loop, trade timing, daily PnL, limits/halts.&#x20;
+
+8. Metrics
+
+* Files: src/metrics.py; tests/test\_metrics.py.
+* Role: perf summary, drawdowns, turnover.&#x20;
+
+9. Statistical tests
+
+* Files: src/stats.py; tests/test\_stats.py.
+* Role: Newey-West alpha, bootstrap CIs, subperiods.&#x20;
+
+10. Cross-validation & robustness
+
+* Files: src/cv.py (plus scripts/compute\_cv.py, compute\_robustness.py); tests/test\_cv.py.
+* Role: J×K grid, walk-forward, cost/subperiod sensitivity.&#x20;
+
+11. Reporting & experiment tracking
+
+* Files: src/reports.py; scripts/make\_report.py, log\_experiment.py; tests/test\_reports.py.
+* Role: write coverage/anomalies/hard-errors; run logs. &#x20;
+
+12. Utilities
+
+* Files: src/utils.py; tests/test\_repro.py.
+* Role: seeding, helpers, calendars.&#x20;
+
+Runner scripts to discover flows
+
+* Ingest: scripts/make\_clean.py → ohlcv.parquet, coverage/anomalies/hard\_errors. &#x20;
+* Universe: scripts/make\_universe.py → eligibility.parquet, monthly\_universe.parquet.&#x20;
+* Signals: scripts/compute\_momentum.py. Portfolios: scripts/compute\_portfolio.py. Backtest: scripts/run\_backtest.py. Metrics: scripts/compute\_metrics.py. Robustness/CV: scripts/compute\_cv.py, compute\_robustness.py. One-shot pipeline: scripts/run\_single.py. &#x20;
+
+Config to anchor everything
+
+* config/data.yml: paths, date range, outputs, required indices. Planned: strategy.yml, backtest.yml, report.yml. &#x20;
+
+Recommended discovery order (matches pipeline)
+data\_io → filters → calendar/returns → momentum → portfolio → costs → backtest → metrics/stats → cv → reports.&#x20;
+
+Repo map for quick orientation
+
+* src/, tests/, config/, scripts/ are the core. Start at AGENTS.md “Project Structure & Module Organization.”&#x20;
+
+If you want, I can list the exact test names to open for each step.

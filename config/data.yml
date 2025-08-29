@@ -21,6 +21,7 @@ extreme_move_abs: 0.50
 
 out:
   ohlcv_parquet: "data/clean/ohlcv.parquet"
+  monthly_universe_parquet: "data/clean/monthly_universe.parquet"
   coverage_csv: "data/clean/coverage_summary.csv"
   anomalies_csv: "data/clean/anomalies.csv"
   hard_errors_csv: "data/clean/hard_errors.csv"
@@ -28,9 +29,11 @@ out:
 signals:
   momentum:
     lookback_months: 12
-    gap_months: 1
+    # Daily skip period per TRD (used for momentum formation)
+    skip_days: 5
+    gap_months: 1  # deprecated (kept for backwards-compat in configs)
     n_deciles: 10
-    min_months_history: 13  # default J+G
+    min_months_history: 12  # minimum historical months to consider valid
     min_names_per_month: 50
     exclude_hard_errors: true
     calendar: "union"  # or "vnindex"
@@ -45,6 +48,11 @@ portfolio:
   redistribute_across_cohorts: false
   exclude_on_missing_price: true
   calendar: "union"
+  # Optional constraints (applied at trade generation stage)
+  # Cap any single name's aggregate monthly target weight at this bound (e.g., 0.10 for 10%).
+  max_weight_per_name: 0.2
+  # Cap gross monthly turnover (0.5*sum(|dW|)) by proportionally scaling trades when exceeded.
+  turnover_cap: null
 
 backtest:
   lag_days: 1

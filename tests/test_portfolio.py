@@ -154,3 +154,63 @@ def test_summary_cash_weight_basic(tmp_path):
     row_f = s.loc[s["month_end"] == me_feb].iloc[0]
     assert abs(float(row_j["cash_weight"]) - 0.5) < 1e-12
     assert abs(float(row_f["cash_weight"]) - 0.5) < 1e-12
+
+
+def test_generate_trades_caps_and_tplus(tmp_path):
+    # Build simple holdings for two months for one name; month-end dates
+    m0, m1 = pd.to_datetime(["2021-01-31", "2021-02-28"]) 
+    holdings = pd.DataFrame(
+        {
+            "month_end": [m0, m1, m1],
+            "ticker": ["AAA", "AAA", "BBB"],
+            # AAA grows to 0.8 then trimmed by cap; BBB enters 0.4
+            "weight": [0.6, 0.8, 0.4],
+        }
+    )
+    # Build tiny OHLCV grid spanning next-month first trading days
+    dates = pd.to_datetime([
+        "2021-01-29",  # last trading day of Jan (Fri)
+        "2021-02-01",  # next trading day (Mon)
+        "2021-02-26",  # last trading day of Feb (Fri)
+        "2021-03-01",  # next trading day (Mon)
+    ])
+    ohlcv = pd.DataFrame(
+        {
+            "date": dates.tolist() * 2,
+            "ticker": ["AAA"] * 4 + ["BBB"] * 4,
+            "open": 1.0,
+            "high": 1.0,
+            "low": 1.0,
+            "close": 1.0,
+            "volume": 1000,
+        }
+    )
+    from src.portfolio import generate_trades
+
+    # Apply caps: max_weight_per_name=0.5, turnover_cap=0.2
+    trades = generate_trades(
+        holdings,
+        t_plus=1,
+        settlement="T+2",
+        ohlcv_df=ohlcv,
+        calendar="union",
+        max_weight_per_name=0.5,
+        turnover_cap=0.2,
+    )
+    # Check schema
+    for c in ["month_end", "ticker", "prev_weight", "target_weight", "trade_dW", "side", "trade_date", "settlement", "settlement_date"]:
+        assert c in trades.columns
+    # Month 0: AAA capped to 0.5 then scaled by turnover cap (0.2 / 0.25 = 0.8) => 0.4
+    t0 = trades[trades["month_end"] == m0].set_index("ticker").loc["AAA"]
+    assert abs(float(t0["target_weight"]) - 0.4) < 1e-12
+    assert abs(float(t0["trade_dW"]) - 0.4) < 1e-12
+    assert t0["side"] == "buy"
+    # Trade date is next trading day after true month-end (2021-01-29 -> 2021-02-01)
+    assert pd.to_datetime(t0["trade_date"]).date() == pd.Timestamp("2021-02-01").date()
+    # Settlement is two trading days after trade_date (2021-02-03 on the grid)
+    # Our grid only includes 2021-02-01 and 2021-02-26; shift caps to last available (implementation clips)
+    assert trades["settlement"].iloc[0] == "T+2"
+    # Month 1: compute gross turnover and ensure scaled to cap
+    sub1 = trades[trades["month_end"] == m1]
+    gross_turnover = 0.5 * np.abs(sub1["trade_dW"]).sum()
+    assert gross_turnover <= 0.2000000001

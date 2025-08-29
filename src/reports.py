@@ -67,6 +67,29 @@ def _ensure_dir(p: str | Path) -> Path:
     return path
 
 
+def _normalize_returns_to_decimal(ser: pd.Series) -> pd.Series:
+    """Best-effort normalization of returns series to decimals.
+
+    Some pipelines may persist monthly returns in percentage units (e.g., 5 for
+    5%), while others use decimals (0.05). This helper detects obviously
+    percentage-scaled data and converts it to decimals for plotting/reporting so
+    benchmarks and strategy are comparable.
+
+    Heuristic: if >=20% of finite observations have absolute value >= 1.0, we
+    treat the series as percentages and divide by 100.
+    """
+    import numpy as _np
+
+    s = pd.to_numeric(ser, errors="coerce")
+    x = s.replace([_np.inf, -_np.inf], _np.nan).dropna()
+    if len(x) == 0:
+        return s
+    frac_ge1 = (x.abs() >= 1.0).mean()
+    if frac_ge1 > 0.20:
+        return s / 100.0
+    return s
+
+
 def _default_report_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     report = {
         "out_dir": "data/clean/report",
@@ -178,6 +201,8 @@ def _try_plot_monthly_returns(
     if col is None:
         return created
     ser = pd.to_numeric(df[col], errors="coerce")
+    # Normalize to decimals if series appears percentage-scaled
+    ser = _normalize_returns_to_decimal(ser)
     ser.index = pd.to_datetime(df.index if df.index.name == "month_end" else df.get("month_end", df.index))
     ser = ser.sort_index()
     # Clip to configured date_range if provided
@@ -225,10 +250,27 @@ def _try_plot_benchmark_compare(
     if col is None:
         return created
     strat = pd.to_numeric(dfm[col], errors="coerce").rename("Strategy")
+    # Normalize to decimals if strategy monthly series is percentage-scaled
+    strat = _normalize_returns_to_decimal(strat)
     # Align to month-end index
     me = pd.to_datetime(dfm.index if dfm.index.name == "month_end" else dfm.get("month_end", dfm.index))
     me = pd.DatetimeIndex(me)
     strat.index = me
+    # Try to build a NAV-based cumulative series for robustness
+    strat_nav_cr = None
+    try:
+        p_daily = Path("data/clean/backtest_daily.parquet")
+        if p_daily.exists():
+            ddf = pd.read_parquet(p_daily)
+            if "nav" in ddf.columns:
+                nav = pd.to_numeric(ddf["nav"], errors="coerce").rename("nav").sort_index()
+                nav_me = nav.reindex(nav.index.union(me)).ffill().reindex(me)
+                # Do not extend beyond last NAV observation
+                nav_me = nav_me.where(nav_me.index <= nav.index.max())
+                if nav_me.notna().sum() > 1:
+                    strat_nav_cr = (nav_me / float(nav_me.dropna().iloc[0])) - 1.0
+    except Exception:
+        strat_nav_cr = None
     # Load indices and compute monthly returns for each benchmark
     try:
         idx_df = load_indices(indices_dir, names=names or ["VNINDEX", "HNX-INDEX", "VN30"])
@@ -238,30 +280,56 @@ def _try_plot_benchmark_compare(
     for nm in (names or ["VNINDEX", "HNX-INDEX", "VN30"]):
         try:
             close = get_index_series(idx_df, nm).sort_index()
+            # As-of sampling on month-end grid, but do NOT forward-fill past
+            # the last available index observation (to avoid spurious zeros
+            # that flatten the tail).
             aligned = close.reindex(close.index.union(me)).ffill().reindex(me)
+            aligned = aligned.where(aligned.index <= close.index.max())
             bench_series[nm] = aligned.pct_change().rename(nm)
         except Exception:
             continue
     if not bench_series:
         return created
     # Build cumulative returns
-    cr = pd.DataFrame({k: (1.0 + v.fillna(0.0)).cumprod() - 1.0 for k, v in bench_series.items()})
-    cr = cr.join(((1.0 + strat.fillna(0.0)).cumprod() - 1.0).rename("Strategy"))
+    bench_cr = pd.DataFrame({k: (1.0 + v.fillna(0.0)).cumprod() - 1.0 for k, v in bench_series.items()})
+    # Strategy cumulative: prefer NAV-based path if available; else cumprod of monthly returns
+    if strat_nav_cr is not None and not strat_nav_cr.dropna().empty:
+        strat_cr = strat_nav_cr.rename("Strategy")
+    else:
+        strat_cr = ((1.0 + strat.fillna(0.0)).cumprod() - 1.0).rename("Strategy")
+    cr = bench_cr.join(strat_cr)
     cr = cr.dropna(how="all")
     if cr.empty:
         return created
+
+    # Figure 1: Single axis, same scale (percent) for both benchmarks and strategy
     figp = figs_dir / "cumret_vs_benchmarks.png"
+    import matplotlib.pyplot as plt  # safe re-import for clarity
     plt.figure(figsize=figsize, dpi=dpi)
     for col in cr.columns:
-        plt.plot(cr.index, cr[col], label=col)
+        plt.plot(cr.index, 100.0 * cr[col], label=col)
+    plt.ylabel("Cumulative Return (%)")
+    plt.xlabel("Month")
     plt.legend()
     plt.title("Cumulative Return vs Benchmarks")
-    plt.xlabel("Month")
-    plt.ylabel("Cumulative Return")
     plt.tight_layout()
     plt.savefig(figp)
     plt.close()
     created.append(figp)
+
+    # Figure 2: Log-scale growth-of-1 on a single axis for an alternative view
+    figp2 = figs_dir / "growth_of_1_log.png"
+    plt.figure(figsize=figsize, dpi=dpi)
+    for col in cr.columns:
+        plt.semilogy((1.0 + cr[col]).clip(lower=1e-6), label=col)
+    plt.ylabel("Growth of $1 (log)")
+    plt.xlabel("Month")
+    plt.legend()
+    plt.title("Growth of $1 (log scale)")
+    plt.tight_layout()
+    plt.savefig(figp2)
+    plt.close()
+    created.append(figp2)
     return created
 
 

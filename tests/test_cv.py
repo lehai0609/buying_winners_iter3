@@ -65,9 +65,20 @@ def test_cross_validate_end_to_end_small(tmp_path):
     ohlcv = _mk_daily_ohlcv("2020-01-01", months=24)
     p = tmp_path / "ohlcv.parquet"
     ohlcv.to_parquet(p)
+    # Monthly universe eligible everywhere
+    from src.calendar import build_trading_grid, month_ends
+    grid = build_trading_grid(ohlcv, calendar="union")
+    me = month_ends(grid)
+    uni = pd.DataFrame({
+        "month_end": list(me) * ohlcv.index.get_level_values("ticker").nunique(),
+        "ticker": sum([[tk] * len(me) for tk in ohlcv.index.get_level_values("ticker").unique()], []),
+        "eligible": [True] * (len(me) * ohlcv.index.get_level_values("ticker").nunique()),
+    })
+    pu = tmp_path / "monthly_universe.parquet"
+    uni.to_parquet(pu, index=False)
 
     cfg = {
-        "out": {"ohlcv_parquet": str(p)},
+        "out": {"ohlcv_parquet": str(p), "monthly_universe_parquet": str(pu)},
         "signals": {"momentum": {
             "lookback_months": 6,
             "gap_months": 1,

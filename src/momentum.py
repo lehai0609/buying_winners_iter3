@@ -6,8 +6,10 @@ from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 
-from .returns import monthly_returns
+from .returns import monthly_returns, daily_simple_returns
+from .returns import cum_return_skip
 from .data_io import load_indices
+from .calendar import build_trading_grid
 
 
 GridMode = Literal["union", "vnindex"]
@@ -177,7 +179,7 @@ def assign_deciles(
 @dataclass
 class MomentumConfig:
     lookback_months: int = 12
-    gap_months: int = 1
+    skip_days: int = 5
     n_deciles: int = 10
     min_months_history: Optional[int] = None
     min_names_per_month: int = 50
@@ -190,7 +192,8 @@ def _cfg_from_dict(raw: dict | None) -> MomentumConfig:
     raw = raw or {}
     sig = (raw.get("signals", {}) or {}).get("momentum", {}) or {}
     lookback = int(sig.get("lookback_months", 12))
-    gap = int(sig.get("gap_months", 1))
+    # Prefer daily skip_days (TRD). Keep gap_months for backward compatibility (ignored here).
+    skip_days = int(sig.get("skip_days", 5))
     ndecs = int(sig.get("n_deciles", 10))
     min_hist = sig.get("min_months_history", None)
     if min_hist is not None:
@@ -203,7 +206,7 @@ def _cfg_from_dict(raw: dict | None) -> MomentumConfig:
     price_col = sig.get("price_col", "close")
     cfg = MomentumConfig(
         lookback_months=lookback,
-        gap_months=gap,
+        skip_days=skip_days,
         n_deciles=ndecs,
         min_months_history=min_hist,
         min_names_per_month=min_names,
@@ -212,13 +215,57 @@ def _cfg_from_dict(raw: dict | None) -> MomentumConfig:
         price_col=price_col,
     )
     # Basic validation
-    if cfg.lookback_months < 1 or cfg.gap_months < 0 or cfg.n_deciles < 2:
+    if cfg.lookback_months < 1 or cfg.skip_days < 0 or cfg.n_deciles < 2:
         raise ValueError("invalid momentum config values")
     if cfg.min_months_history is None:
-        cfg.min_months_history = cfg.lookback_months + cfg.gap_months
+        cfg.min_months_history = cfg.lookback_months  # historical minimum in months
     if cfg.min_names_per_month < 1:
         cfg.min_names_per_month = 1
     return cfg
+
+
+def momentum_scores(
+    ret_d: pd.Series | pd.DataFrame,
+    universe_mask: pd.DataFrame | None,
+    J: int,
+    skip_days: int = 5,
+    calendar: GridMode = "union",
+    indices_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Compute momentum scores from daily returns with a 5-day skip.
+
+    Inputs
+    - ret_d: MultiIndex [date,ticker] of simple daily returns (Series name 'ret_1d' or DataFrame with 'ret_1d').
+    - universe_mask: Optional DataFrame with ['month_end','ticker','eligible'] booleans. Score computed only where eligible.
+    - J: Lookback in months.
+    - skip_days: Trading days to skip before formation month-end.
+    - calendar/indices_df: Calendar for formation schedule (union or VNINDEX).
+
+    Output
+    - DataFrame with columns ['month_end','ticker','momentum','valid'].
+    """
+    # Compute cumulative window return with skip
+    win = cum_return_skip(ret_d, J_months=int(J), skip_days=int(skip_days), calendar=calendar, indices_df=indices_df)
+    if len(win) == 0:
+        return pd.DataFrame(columns=["month_end", "ticker", "momentum", "valid"]).astype({})
+    out = win.rename(columns={"window_ret": "momentum"}).copy()
+    # Default validity: finite momentum and >0 days used
+    out["valid"] = out["momentum"].replace([np.inf, -np.inf], np.nan).notna() & (out.get("n_days_used", 0) > 0)
+    # Apply universe eligibility mask at formation month if provided
+    if universe_mask is not None and len(universe_mask) > 0:
+        req = {"month_end", "ticker", "eligible"}
+        if req - set(universe_mask.columns):
+            raise ValueError("universe_mask must have columns ['month_end','ticker','eligible']")
+        elig = universe_mask[["month_end", "ticker", "eligible"]].copy()
+        elig["month_end"] = pd.to_datetime(elig["month_end"], errors="raise")
+        out = out.merge(elig, on=["month_end", "ticker"], how="left")
+        out["eligible"] = out["eligible"].fillna(False).astype(bool)
+        # Keep only rows where the universe is eligible at formation
+        out = out[out["eligible"]].copy()
+        out = out.drop(columns=["eligible"])  # keep interface compact
+        # Recompute validity to reflect any filtering (finite momentum and >0 days used)
+        out["valid"] = out["momentum"].replace([np.inf, -np.inf], np.nan).notna() & (out.get("n_days_used", 0) > 0)
+    return out[["month_end", "ticker", "momentum", "valid"]].sort_values(["month_end", "ticker"]).reset_index(drop=True)
 
 
 def compute_momentum_signals(
@@ -226,6 +273,7 @@ def compute_momentum_signals(
     cfg_dict: dict | None = None,
     clean_parquet_path: str | Path | None = None,
     indices_dir: str | Path | None = None,
+    monthly_flags: pd.DataFrame | None = None,
     write: bool = True,
     out_parquet: str | Path = "data/clean/momentum.parquet",
     summary_csv: str | Path | None = None,
@@ -263,20 +311,34 @@ def compute_momentum_signals(
                 pass
 
     # Calendar indices if needed
-    indices_df = None
+    indices_df_local = None
     if cfg.calendar == "vnindex":
-        dirp = Path(indices_dir or (cfg_dict or {}).get("raw_dirs", {}).get("indices", "vn_indices"))
-        indices_df = load_indices(str(dirp))
+        dirp = Path(indices_dir or (cfg_dict or {}).get("raw_dirs", {}) .get("indices", "vn_indices"))
+        indices_df_local = load_indices(str(dirp))
 
-    # Monthly returns from daily prices
-    mret = monthly_returns(df, calendar=cfg.calendar, indices_df=indices_df, price_col=cfg.price_col)
+    # Compute daily returns
+    ret_d = daily_simple_returns(df, price_col=cfg.price_col)
 
-    # Momentum
-    mom = compute_momentum(
-        mret,
-        lookback=cfg.lookback_months,
-        gap=cfg.gap_months,
-        min_months_history=cfg.min_months_history,
+    # Load monthly universe mask from config output if not supplied
+    if monthly_flags is None and isinstance(cfg_dict, dict):
+        uni_path = Path((cfg_dict.get("out", {}) or {}).get("monthly_universe_parquet", "data/clean/monthly_universe.parquet"))
+        if not uni_path.exists():
+            raise FileNotFoundError(f"monthly universe parquet not found: {uni_path}")
+        uf = pd.read_parquet(uni_path)
+        # Expect columns ['month_end','ticker','eligible']
+        if not {"month_end", "ticker", "eligible"}.issubset(uf.columns):
+            raise ValueError("monthly universe parquet must have columns ['month_end','ticker','eligible']")
+        uf["month_end"] = pd.to_datetime(uf["month_end"], errors="raise")
+        monthly_flags = uf
+
+    # Momentum from daily returns with 5-day skip per TRD
+    mom = momentum_scores(
+        ret_d=ret_d,
+        universe_mask=monthly_flags,
+        J=cfg.lookback_months,
+        skip_days=cfg.skip_days,
+        calendar=cfg.calendar,
+        indices_df=indices_df_local,
     )
 
     # Deciles and percentile ranks

@@ -7,6 +7,9 @@ from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 
+from .calendar import build_trading_grid, month_ends, shift_trading_days
+from .data_io import load_indices
+
 
 SelectionMode = Literal["top_decile", "top_quantile"]
 
@@ -21,6 +24,9 @@ class PortfolioConfig:
     redistribute_across_cohorts: bool = False
     exclude_on_missing_price: bool = True
     calendar: Literal["union", "vnindex"] | str = "union"
+    # Optional constraints (applied at trade generation stage)
+    max_weight_per_name: Optional[float] = None
+    turnover_cap: Optional[float] = None
 
 
 def _cfg_from_dict(raw: dict | None) -> PortfolioConfig:
@@ -40,6 +46,10 @@ def _cfg_from_dict(raw: dict | None) -> PortfolioConfig:
     redist = bool(por.get("redistribute_across_cohorts", False))
     excl = bool(por.get("exclude_on_missing_price", True))
     cal = por.get("calendar", raw.get("signals", {}).get("momentum", {}).get("calendar", "union"))
+    wmax = por.get("max_weight_per_name", None)
+    wmax = (float(wmax) if wmax is not None else None)
+    to_cap = por.get("turnover_cap", None)
+    to_cap = (float(to_cap) if to_cap is not None else None)
     cfg = PortfolioConfig(
         k_months=k,
         selection=sel,  # type: ignore
@@ -49,6 +59,8 @@ def _cfg_from_dict(raw: dict | None) -> PortfolioConfig:
         redistribute_across_cohorts=redist,
         exclude_on_missing_price=excl,
         calendar=cal,
+        max_weight_per_name=wmax,
+        turnover_cap=to_cap,
     )
     # Basic validation
     if cfg.k_months < 1:
@@ -270,6 +282,108 @@ def holdings_to_trades(holdings: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def generate_trades(
+    holdings: pd.DataFrame,
+    *,
+    t_plus: int = 1,
+    settlement: str = "T+2",
+    ohlcv_df: Optional[pd.DataFrame] = None,
+    calendar: Literal["union", "vnindex"] = "union",
+    indices_dir: str | Path | None = None,
+    max_weight_per_name: Optional[float] = None,
+    turnover_cap: Optional[float] = None,
+) -> pd.DataFrame:
+    """Generate monthly trades with optional caps and trading dates.
+
+    - Caps per-name target weight at `max_weight_per_name` (if provided).
+    - Caps per-month gross turnover at `turnover_cap` by proportional scaling of trades (if provided).
+    - Annotates `trade_date` shifted by `t_plus` trading days after the true month-end on the grid,
+      and `settlement_date` if settlement == 'T+2' (trade_date + 2 trading days).
+
+    Returns columns: ['month_end','ticker','prev_weight','target_weight','trade_dW','side',
+                      'trade_date','settlement','settlement_date'].
+    """
+    req = {"month_end", "ticker", "weight"}
+    if req - set(holdings.columns):
+        raise ValueError("holdings must include ['month_end','ticker','weight']")
+    # Aggregate to monthly targets
+    d = holdings[["month_end", "ticker", "weight"]].copy()
+    d["month_end"] = pd.to_datetime(d["month_end"], errors="raise")
+    d = d.groupby(["month_end", "ticker"], as_index=False).agg(target_weight=("weight", "sum"))
+
+    # Apply per-name weight cap if requested
+    if max_weight_per_name is not None:
+        wmax = float(max_weight_per_name)
+        if wmax <= 0:
+            raise ValueError("max_weight_per_name must be > 0 when provided")
+        d["target_weight"] = d["target_weight"].clip(upper=wmax)
+
+    # Prev weights by ticker
+    d = d.sort_values(["ticker", "month_end"]).reset_index(drop=True)
+    d["prev_weight"] = d.groupby("ticker")["target_weight"].shift(1).fillna(0.0)
+    d["trade_dW"] = (d["target_weight"] - d["prev_weight"]).astype(float)
+
+    # Turnover cap per month: scale all trades proportionally
+    if turnover_cap is not None:
+        cap = float(turnover_cap)
+        if cap <= 0:
+            raise ValueError("turnover_cap must be > 0 when provided")
+        grp = d.groupby("month_end", as_index=False)
+        turn = grp["trade_dW"].apply(lambda x: float(0.5 * np.abs(x).sum())).rename(columns={"trade_dW": "gross_turnover"})
+        d = d.merge(turn, on="month_end", how="left")
+        # scale = min(1, cap/turnover) per month
+        eps = 1e-15
+        scale = np.where(d["gross_turnover"] > eps, np.minimum(1.0, cap / d["gross_turnover"].astype(float)), 1.0)
+        d["trade_dW"] = d["trade_dW"].astype(float) * scale
+        # Adjust target_weight to reflect scaled trade
+        d["target_weight"] = d["prev_weight"].astype(float) + d["trade_dW"].astype(float)
+        d = d.drop(columns=["gross_turnover"])  # no longer needed
+
+    # Side
+    eps = 1e-12
+    d["side"] = np.where(d["trade_dW"] > eps, "buy", np.where(d["trade_dW"] < -eps, "sell", "none"))
+
+    # Build trading grid and map trade/settlement dates
+    # Load OHLCV if needed
+    if ohlcv_df is None:
+        p_daily = Path("data/clean/ohlcv.parquet")
+        if p_daily.exists():
+            ohlcv_df = pd.read_parquet(p_daily)
+        else:
+            ohlcv_df = pd.DataFrame(columns=["date", "ticker", "close"]).set_index(pd.MultiIndex.from_arrays([[], []], names=["date", "ticker"]))
+    # Load indices if calendar='vnindex' and indices_dir provided
+    idx_df: Optional[pd.DataFrame] = None
+    if calendar == "vnindex":
+        # Try to load from provided folder; fall back to config default folder name
+        try:
+            dir_guess = Path(indices_dir) if indices_dir is not None else Path("vn_indices")
+            if dir_guess.exists():
+                idx_df = load_indices(dir_guess)
+        except Exception:
+            idx_df = None
+    grid = build_trading_grid(ohlcv_df, calendar=calendar, indices_df=idx_df)
+    # Map provided month_end timestamps to actual month-end on grid
+    me = pd.to_datetime(pd.Series(d["month_end"].unique())).sort_values()
+    me_on_grid = month_ends(grid)
+    # period->month_end mapping
+    period_to_me = pd.Series(me_on_grid.values, index=me_on_grid.to_period("M"))
+    mapped_me = me.dt.to_period("M").map(period_to_me)
+    # Build mapping from month_end to trade_date shifted by t_plus
+    exec_dates = shift_trading_days(grid, pd.DatetimeIndex(mapped_me.values), int(t_plus))
+    exec_map = {pd.Timestamp(k): pd.Timestamp(v) for k, v in zip(me.values, exec_dates.values)}
+    d["trade_date"] = d["month_end"].map(lambda x: exec_map.get(pd.Timestamp(x), pd.NaT))
+
+    # Settlement label and dates
+    d["settlement"] = str(settlement)
+    if settlement.upper() == "T+2":
+        # settlement_date = trade_date + 2 trading days
+        d["settlement_date"] = shift_trading_days(grid, pd.to_datetime(d["trade_date"]).fillna(pd.NaT), 2).values
+    else:
+        d["settlement_date"] = pd.NaT
+
+    return d.sort_values(["month_end", "ticker"]).reset_index(drop=True)
+
+
 def compute_portfolio(
     cfg_dict: dict | None = None,
     signals_df: pd.DataFrame | None = None,
@@ -330,7 +444,19 @@ def compute_portfolio(
         redistribute_across_cohorts=cfg.redistribute_across_cohorts,
     )
 
-    trades = holdings_to_trades(holdings)
+    # Generate trades with optional caps and trade/settlement dates
+    # Attempt to infer indices folder for VNINDEX calendar from config default layout
+    indices_dir = Path("vn_indices")
+    trades = generate_trades(
+        holdings,
+        t_plus=1,
+        settlement="T+2",
+        ohlcv_df=ohlcv_df,
+        calendar=cfg.calendar if cfg.calendar in ("union", "vnindex") else "union",
+        indices_dir=indices_dir,
+        max_weight_per_name=cfg.max_weight_per_name,
+        turnover_cap=cfg.turnover_cap,
+    )
 
     if write:
         out_holdings = Path(out_holdings)

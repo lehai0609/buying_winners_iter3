@@ -3,7 +3,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from .calendar import build_trading_grid, month_ends, align_to_grid
+from .calendar import build_trading_grid, month_ends, align_to_grid, shift_trading_days
 
 
 def _ensure_multiindex(df: pd.DataFrame) -> pd.DataFrame:
@@ -115,3 +115,95 @@ def eligible_monthly_returns(
     )
     merged = merged[merged["eligible"].fillna(False).astype(bool)].drop(columns=["eligible"]).reset_index(drop=True)
     return merged
+
+
+def cum_return_skip(
+    ret_d: pd.Series | pd.DataFrame,
+    J_months: int,
+    skip_days: int = 5,
+    calendar: Literal["union", "vnindex"] = "union",
+    indices_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Compute cumulative return over the last J months excluding the most recent `skip_days`.
+
+    Inputs
+    - ret_d: MultiIndex [date,ticker] of simple daily returns. Accepts a Series (name 'ret_1d') or a
+      single-column DataFrame with column 'ret_1d'. Use ``daily_simple_returns`` to construct.
+    - J_months: Lookback window in calendar months.
+    - skip_days: Number of trading days to skip prior to the formation date (default 5).
+    - calendar / indices_df: Used only to derive month-end formation dates when "vnindex" is requested.
+
+    Output
+    - DataFrame with columns ["month_end","ticker","window_ret","n_days_used"].
+
+    Logic
+    - For each formation month-end t on the chosen grid, define e_excl = shift(t, -skip_days).
+      Include daily returns with dates d such that s < d < e_excl, where s is the month-end exactly
+      J months before t. The product of (1+ret_d) over that interval minus 1 is returned as ``window_ret``.
+    """
+    # Normalize input to Series named 'ret_1d'
+    if isinstance(ret_d, pd.DataFrame):
+        if "ret_1d" not in ret_d.columns:
+            raise ValueError("ret_d DataFrame must have a 'ret_1d' column")
+        series = ret_d["ret_1d"].copy()
+    else:
+        series = ret_d.copy()
+    if series.name is None:
+        series.name = "ret_1d"
+
+    # Ensure MultiIndex [date,ticker]
+    if not isinstance(series.index, pd.MultiIndex) or list(series.index.names) != ["date", "ticker"]:
+        raise ValueError("ret_d must be indexed by MultiIndex ['date','ticker']")
+
+    # Build grid and month-ends for formation schedule
+    # We can reuse build_trading_grid by passing a dummy frame with this index
+    dummy = pd.DataFrame(index=series.index)
+    grid = build_trading_grid(dummy, calendar=calendar, indices_df=indices_df)
+    me = month_ends(grid)
+    if J_months < 1 or skip_days < 0:
+        raise ValueError("J_months must be >=1 and skip_days >= 0")
+
+    # Map month period to its month-end trading day on the grid
+    me_series = pd.Series(me, index=me.to_period("M"))
+
+    out_rows: list[dict] = []
+    # Pre-split by ticker for speed
+    by_ticker = {tk: s.sort_index() for tk, s in series.groupby(level="ticker")}
+
+    for t in me:
+        # Locate the month-end J months earlier
+        t_per = t.to_period("M")
+        s_per = t_per - J_months
+        if s_per not in me_series.index:
+            continue  # insufficient history on calendar
+        s_anchor = pd.to_datetime(me_series.loc[s_per])
+        # Exclude last `skip_days` via exclusive end marker
+        e_excl = shift_trading_days(grid, pd.DatetimeIndex([t]), -int(skip_days))[0]
+        if pd.isna(e_excl):
+            continue
+        # Construct open interval (s_anchor, e_excl)
+        for tk, s in by_ticker.items():
+            # Slice the ticker's daily returns strictly within the bounds
+            # Note: index level 0 is date
+            s_tk = s.xs(tk, level="ticker")
+            mask = (s_tk.index > s_anchor) & (s_tk.index < e_excl)
+            window = s_tk.loc[mask].dropna()
+            if len(window) == 0:
+                win_ret = np.nan
+                n_days = 0
+            else:
+                # Product of (1+ret_d) minus 1
+                win_ret = float(np.prod(1.0 + window.values) - 1.0)
+                n_days = int(len(window))
+            out_rows.append({
+                "month_end": t,
+                "ticker": tk,
+                "window_ret": win_ret,
+                "n_days_used": n_days,
+            })
+
+    out = pd.DataFrame(out_rows)
+    if len(out) == 0:
+        return pd.DataFrame(columns=["month_end", "ticker", "window_ret", "n_days_used"])
+    out["month_end"] = pd.to_datetime(out["month_end"])  # ensure dtype
+    return out.sort_values(["month_end", "ticker"]).reset_index(drop=True)
