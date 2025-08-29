@@ -25,7 +25,8 @@ def daily_simple_returns(df: pd.DataFrame, price_col: str = "close") -> pd.Serie
     if price_col not in df.columns:
         raise ValueError(f"missing required price column '{price_col}'")
     px = pd.to_numeric(df[price_col], errors="coerce")
-    ret = px.groupby(level="ticker").pct_change()
+    # Avoid pandas FutureWarning by disabling implicit ffill within pct_change
+    ret = px.groupby(level="ticker").pct_change(fill_method=None)
     ret.name = "ret_1d"
     return ret
 

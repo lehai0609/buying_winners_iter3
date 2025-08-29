@@ -210,8 +210,9 @@ def compute_backtest(
         # Determine tradability and limit on exec date
         # Build index for that date across tickers
         idx = pd.MultiIndex.from_product([[pd.Timestamp(d_exec)], gg["ticker"].astype(str)], names=["date", "ticker"])
-        trad = tradable.reindex(idx).fillna(False)
-        lhit = limit_hit.reindex(idx).fillna(False)
+        # Use fill_value to avoid downcasting warnings on fillna for boolean-like series
+        trad = tradable.reindex(idx, fill_value=False)
+        lhit = limit_hit.reindex(idx, fill_value=False)
 
         # Decide fills
         filled_weight = []

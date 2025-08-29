@@ -152,10 +152,10 @@ def eligibility_flags(
 
     # Consolidate output
     out = pd.DataFrame(index=full_idx)
-    out["min_history_ok"] = min_history_ok.reindex(full_idx).fillna(False).astype(bool)
-    out["price_ok"] = price_ok.reindex(full_idx).fillna(False).astype(bool)
-    out["adv_ok"] = adv_ok.reindex(full_idx).fillna(False).astype(bool)
-    out["nontrading_ok"] = nontrading_ok.reindex(full_idx).fillna(False).astype(bool)
+    out["min_history_ok"] = min_history_ok.reindex(full_idx, fill_value=False).astype(bool)
+    out["price_ok"] = price_ok.reindex(full_idx, fill_value=False).astype(bool)
+    out["adv_ok"] = adv_ok.reindex(full_idx, fill_value=False).astype(bool)
+    out["nontrading_ok"] = nontrading_ok.reindex(full_idx, fill_value=False).astype(bool)
     out["quality_ok"] = quality_ok.reindex(full_idx).fillna(True).astype(bool)
     out["days_history"] = days_hist.reindex(full_idx).fillna(0.0).astype(float)
     out["days_traded_in_window"] = days_traded.reindex(full_idx).fillna(0.0).astype(float)

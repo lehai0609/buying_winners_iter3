@@ -4,6 +4,9 @@ from typing import Any
 import pandas as pd
 import json
 import datetime as _dt
+from pathlib import Path
+
+from .data_io import load_indices, get_index_series
 
 # NOTE: Existing helpers (write_coverage, write_anomalies, write_hard_errors)
 # remain unchanged for backward compatibility and tests.
@@ -153,6 +156,115 @@ def _try_table_monthly(backtest_monthly: Path, tables_dir: Path) -> list[Path]:
     return created
 
 
+def _try_plot_monthly_returns(
+    backtest_monthly: Path,
+    figs_dir: Path,
+    date_range: dict | None = None,
+    dpi: int = 150,
+    figsize: tuple[int, int] = (10, 4),
+) -> list[Path]:
+    created: list[Path] = []
+    if not backtest_monthly.exists():
+        return created
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return created
+    try:
+        df = pd.read_parquet(backtest_monthly)
+    except Exception:
+        return created
+    col = "ret_net_m" if "ret_net_m" in df.columns else ("ret_gross_m" if "ret_gross_m" in df.columns else None)
+    if col is None:
+        return created
+    ser = pd.to_numeric(df[col], errors="coerce")
+    ser.index = pd.to_datetime(df.index if df.index.name == "month_end" else df.get("month_end", df.index))
+    ser = ser.sort_index()
+    # Clip to configured date_range if provided
+    if isinstance(date_range, dict):
+        start = date_range.get("start")
+        end = date_range.get("end")
+        if start is not None:
+            ser = ser[ser.index >= pd.to_datetime(start)]
+        if end is not None:
+            ser = ser[ser.index <= pd.to_datetime(end)]
+    figp = figs_dir / "monthly_returns.png"
+    plt.figure(figsize=figsize, dpi=dpi)
+    colors = ser.apply(lambda x: "#2ca02c" if x >= 0 else "#d62728")
+    plt.bar(ser.index, ser.values, color=colors, width=20)
+    plt.title("Monthly Returns (Strategy)")
+    plt.xlabel("Month")
+    plt.ylabel("Return")
+    plt.tight_layout()
+    plt.savefig(figp)
+    plt.close()
+    created.append(figp)
+    return created
+
+
+def _try_plot_benchmark_compare(
+    backtest_monthly: Path,
+    indices_dir: Path,
+    figs_dir: Path,
+    dpi: int = 150,
+    figsize: tuple[int, int] = (10, 5),
+    names: list[str] | None = None,
+) -> list[Path]:
+    created: list[Path] = []
+    if not backtest_monthly.exists() or not indices_dir.exists():
+        return created
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return created
+    try:
+        dfm = pd.read_parquet(backtest_monthly)
+    except Exception:
+        return created
+    col = "ret_net_m" if "ret_net_m" in dfm.columns else ("ret_gross_m" if "ret_gross_m" in dfm.columns else None)
+    if col is None:
+        return created
+    strat = pd.to_numeric(dfm[col], errors="coerce").rename("Strategy")
+    # Align to month-end index
+    me = pd.to_datetime(dfm.index if dfm.index.name == "month_end" else dfm.get("month_end", dfm.index))
+    me = pd.DatetimeIndex(me)
+    strat.index = me
+    # Load indices and compute monthly returns for each benchmark
+    try:
+        idx_df = load_indices(indices_dir, names=names or ["VNINDEX", "HNX-INDEX", "VN30"])
+    except Exception:
+        return created
+    bench_series = {}
+    for nm in (names or ["VNINDEX", "HNX-INDEX", "VN30"]):
+        try:
+            close = get_index_series(idx_df, nm).sort_index()
+            aligned = close.reindex(close.index.union(me)).ffill().reindex(me)
+            bench_series[nm] = aligned.pct_change().rename(nm)
+        except Exception:
+            continue
+    if not bench_series:
+        return created
+    # Build cumulative returns
+    cr = pd.DataFrame({k: (1.0 + v.fillna(0.0)).cumprod() - 1.0 for k, v in bench_series.items()})
+    cr = cr.join(((1.0 + strat.fillna(0.0)).cumprod() - 1.0).rename("Strategy"))
+    cr = cr.dropna(how="all")
+    if cr.empty:
+        return created
+    figp = figs_dir / "cumret_vs_benchmarks.png"
+    plt.figure(figsize=figsize, dpi=dpi)
+    for col in cr.columns:
+        plt.plot(cr.index, cr[col], label=col)
+    plt.legend()
+    plt.title("Cumulative Return vs Benchmarks")
+    plt.xlabel("Month")
+    plt.ylabel("Cumulative Return")
+    plt.tight_layout()
+    plt.savefig(figp)
+    plt.close()
+    created.append(figp)
+    return created
+
+
 def assemble_report(cfg: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
     """Assemble a lightweight Markdown report.
 
@@ -184,7 +296,15 @@ def assemble_report(cfg: dict[str, Any] | None = None, run_id: str | None = None
     figs += _try_plot_equity(backtest_daily, figs_dir, dpi=dpi, figsize=figsize)  # equity + dd
     tables += _try_table_monthly(backtest_monthly, tables_dir)
 
-    # Compose Markdown (include links to created artifacts)
+    # Additional figures: monthly returns bar chart and benchmark comparison
+    # Resolve indices dir and date_range if present in cfg
+    raw_dirs = (cfg.get("raw_dirs", {}) if isinstance(cfg, dict) else {}) or {}
+    indices_dir = Path(raw_dirs.get("indices", "vn_indices"))
+    date_range = (cfg.get("date_range", {}) if isinstance(cfg, dict) else {}) or {}
+    figs += _try_plot_monthly_returns(backtest_monthly, figs_dir, date_range=date_range, dpi=dpi, figsize=(10, 4))
+    figs += _try_plot_benchmark_compare(backtest_monthly, indices_dir, figs_dir, dpi=dpi, figsize=(10, 5), names=["VNINDEX", "HNX-INDEX", "VN30"])
+
+    # Compose Markdown (include links to created artifacts and metrics if present)
     report_md = out_dir / "momentum_report.md"
     created_at = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
     lines = [
@@ -196,6 +316,61 @@ def assemble_report(cfg: dict[str, Any] | None = None, run_id: str | None = None
         "## Overview",
         "This report summarizes the backtest results, equity curve, drawdowns, and monthly returns.",
     ]
+    # Metrics section (best-effort from metrics CSVs)
+    try:
+        metrics_csv = Path((cfg.get("out", {}) or {}).get("metrics_summary", "data/clean/metrics_summary.csv"))  # type: ignore[union-attr]
+        alpha_csv = Path((cfg.get("out", {}) or {}).get("alpha_newey_west", "data/clean/alpha_newey_west.csv"))  # type: ignore[union-attr]
+        if metrics_csv.exists():
+            mdf = pd.read_csv(metrics_csv)
+            if not mdf.empty:
+                m = mdf.iloc[0].to_dict()
+                def _fmt_pct(x: float) -> str:
+                    try:
+                        return f"{100.0*float(x):.2f}%"
+                    except Exception:
+                        return "nan"
+                def _fmt(x: float) -> str:
+                    try:
+                        return f"{float(x):.3f}"
+                    except Exception:
+                        return "nan"
+                lines.extend([
+                    "",
+                    "## Metrics",
+                    f"- N months: {int(m.get('N_months', 0))}",
+                    f"- CAGR: {_fmt_pct(m.get('CAGR', float('nan')))}",
+                    f"- Vol (ann): {_fmt(m.get('vol_ann', float('nan')))}",
+                    f"- Sharpe: {_fmt(m.get('Sharpe', float('nan')))}",
+                    f"- IR (vs benchmark): {_fmt(m.get('IR', float('nan')))}",
+                    f"- Max Drawdown: {_fmt_pct(m.get('maxDD', float('nan')))}",
+                    f"- DD duration (months): {int(m.get('dd_duration', 0))}",
+                    f"- Beta: {_fmt(m.get('beta', float('nan')))}",
+                ])
+        if alpha_csv.exists():
+            adf = pd.read_csv(alpha_csv)
+            if not adf.empty:
+                a = adf.iloc[0].to_dict()
+                def _fmt_pct2(x: float) -> str:
+                    try:
+                        return f"{100.0*float(x):.2f}%"
+                    except Exception:
+                        return "nan"
+                def _fmt2(x: float) -> str:
+                    try:
+                        return f"{float(x):.3f}"
+                    except Exception:
+                        return "nan"
+                lines.extend([
+                    "",
+                    "## Alpha (Newey–West)",
+                    f"- Alpha (ann.): {_fmt_pct2(a.get('alpha_ann', float('nan')))}",
+                    f"- t(alpha): {_fmt2(a.get('t_alpha', float('nan')))}",
+                    f"- p-value: {_fmt2(a.get('p_value', float('nan')))}",
+                    f"- Beta: {_fmt2(a.get('beta', float('nan')))}",
+                ])
+    except Exception:
+        # metrics optional; ignore errors
+        pass
     if figs:
         lines.append("\n## Figures")
         for p in figs:

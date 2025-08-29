@@ -54,7 +54,8 @@ def compute_monthly_returns(monthly_px: pd.DataFrame) -> pd.DataFrame:
     d["month_end"] = pd.to_datetime(d["month_end"], errors="raise")
     d["close"] = pd.to_numeric(d["close"], errors="coerce")
     d = d.sort_values(["ticker", "month_end"]).reset_index(drop=True)
-    d["ret_1m"] = d.groupby("ticker")["close"].pct_change()
+    # Disable implicit ffill to silence pandas FutureWarning; use pure shift/ratio
+    d["ret_1m"] = d.groupby("ticker")["close"].pct_change(fill_method=None)
     return d[["month_end", "ticker", "ret_1m"]]
 
 

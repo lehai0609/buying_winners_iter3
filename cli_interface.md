@@ -124,6 +124,20 @@ poetry run python scripts/make_report.py -c config/data.yml --run-id momentum_ru
 poetry run python scripts/log_experiment.py <run_id> -c config/data.yml --metrics sharpe=1.23 ret_ann=0.18
 ```
 
+11) Fast Single J/K Run (skip grid search)
+
+If you only want to evaluate one scenario with a chosen formation window J and holding window K (and still get metrics, figures, and a markdown report), use:
+
+```bash
+poetry run python scripts/run_single.py --params 12 6 -c config/data.yml
+```
+
+Notes
+
+- This runs M4→M8 sequentially with J=12, K=6, writes standard outputs under `data/clean/`, and then assembles a markdown report under `data/clean/report/momentum_report.md`.
+- You can optionally tag the run: `--run-id J12_K6`.
+- It respects other config settings (e.g., calendar, gap, deciles, costs/backtest options) from `config/data.yml`.
+
 Notes
 
 - Use `--config` for `make_clean.py` (short `-c` is not supported there). Other scripts accept `-c` or `--config`.
