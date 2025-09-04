@@ -290,19 +290,32 @@ def compute_backtest(
     tickers = ohlcv.index.get_level_values("ticker").unique().astype(str)
     full_idx = pd.MultiIndex.from_product([grid, tickers], names=["date", "ticker"])
     wdf = pd.DataFrame(index=full_idx)
-    # Start all-zero; set setpoints at exec dates where present
-    wdf["weight"] = 0.0
+    # We'll mark explicit setpoint days, and ensure that on setpoint days tickers not
+    # present in the target list are reset to 0 (so previous weights don't persist).
+    wdf["weight"] = np.nan
+    wdf["is_setpoint"] = False
     for d_exec, series in sorted(weights_setpoints.items(), key=lambda x: x[0]):
-        # Set that day's weights to series (for listed tickers); others keep previous values and will be ffilled
-        # We implement setpoint by writing series at date, then ffill later.
-        idx = pd.MultiIndex.from_product([[pd.Timestamp(d_exec)], series.index.astype(str)], names=["date", "ticker"])
-        wdf.loc[idx, "weight"] = series.values
-    # Forward-fill per ticker, ensuring earlier days before first setpoint remain zero
+        d_exec = pd.Timestamp(d_exec)
+        # On this rebalance date, default all tickers to 0, then write target weights
+        idx_row = pd.MultiIndex.from_product([[d_exec], tickers], names=["date", "ticker"])
+        wdf.loc[idx_row, "weight"] = 0.0
+        # Now write weights for names in the setpoint
+        if not series.empty:
+            idx = pd.MultiIndex.from_product([[d_exec], series.index.astype(str)], names=["date", "ticker"])
+            wdf.loc[idx, "weight"] = series.values
+        # Mark setpoint
+        wdf.loc[(d_exec, slice(None)), "is_setpoint"] = True
+    # Forward-fill weights per ticker: only carry values across non-setpoint days.
+    # On setpoint dates, zeros are respected (to drop names), while non-setpoint
+    # zeros are treated as missing and filled from prior setpoint.
     wdf = wdf.sort_index()
-    # Forward-fill weights per ticker from the last setpoint; keep zeros before first set
-    wdf["weight"] = (
-        wdf.groupby(level="ticker")["weight"].transform(lambda s: s.replace(0.0, np.nan).ffill().fillna(0.0)).astype(float)
-    )
+    # Treat non-setpoint rows as missing for ffill
+    w_series = wdf["weight"]
+    mask_set = wdf["is_setpoint"].astype(bool)
+    w_series = w_series.where(mask_set | w_series.notna(), np.nan)
+    wdf["weight"] = w_series.groupby(level="ticker").ffill().fillna(0.0).astype(float)
+    # Drop helper column
+    wdf = wdf.drop(columns=["is_setpoint"]) 
 
     # Cash weight as 1 - sum weights per date (clip to [0,1])
     invested = wdf.groupby(level="date")["weight"].sum().rename("invested_weight")
